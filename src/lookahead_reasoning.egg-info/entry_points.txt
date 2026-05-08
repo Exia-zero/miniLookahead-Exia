@@ -1,0 +1,2 @@
+[console_scripts]
+lookahead-reasoning = main:main

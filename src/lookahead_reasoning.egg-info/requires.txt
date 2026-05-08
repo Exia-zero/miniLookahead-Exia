@@ -1,0 +1,3 @@
+vllm==0.10.1
+dynasor @ git+https://github.com/hao-ai-lab/Dynasor.git
+sentence-transformers
