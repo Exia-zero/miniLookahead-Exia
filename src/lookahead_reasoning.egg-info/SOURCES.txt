@@ -1,9 +1,0 @@
-LICENSE
-README.md
-pyproject.toml
-src/lookahead_reasoning.egg-info/PKG-INFO
-src/lookahead_reasoning.egg-info/SOURCES.txt
-src/lookahead_reasoning.egg-info/dependency_links.txt
-src/lookahead_reasoning.egg-info/entry_points.txt
-src/lookahead_reasoning.egg-info/requires.txt
-src/lookahead_reasoning.egg-info/top_level.txt
