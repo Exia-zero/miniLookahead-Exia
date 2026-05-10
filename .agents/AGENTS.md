@@ -1,1 +1,1 @@
-All code output should display line numbers.
+When modifying the code, display the line number of the code location.

@@ -26,11 +26,23 @@ def load_jsonl_files(directory: str) -> List[Dict[str, Any]]:
     return data, file_count
 
 
-def calculate_metrics(data: List[Dict[str, Any]]) -> Tuple[float, float, int, int]:
+def calculate_metrics(data: List[Dict[str, Any]]) -> Tuple:
     """Calculate accuracy and speed for given data."""
     # Calculate average speed
     speeds = [item.get("speed", 0) for item in data if "speed" in item]
     avg_speed = sum(speeds) / len(speeds) if speeds else 0
+
+    # Calculate accept rate
+    total_accepts = 0
+    total_accept_decisions = 0
+    for item in data:
+        accepts = item.get("accepts", [])
+        if isinstance(accepts, list):
+            total_accepts += sum(1 for v in accepts if v)
+            total_accept_decisions += len(accepts)
+    accept_rate = (
+        total_accepts / total_accept_decisions if total_accept_decisions else 0
+    )
 
     # Calculate accuracy
     correct = 0
@@ -53,7 +65,17 @@ def calculate_metrics(data: List[Dict[str, Any]]) -> Tuple[float, float, int, in
     avg_tokens = total_tokens / total if total > 0 else 0
     avg_thinks = total_thinks / total if total > 0 else 0
     accuracy = (correct / total * 100) if total > 0 else 0
-    return accuracy, avg_speed, avg_tokens, avg_thinks, correct, total
+    return (
+        accuracy,
+        avg_speed,
+        avg_tokens,
+        avg_thinks,
+        correct,
+        total,
+        accept_rate,
+        total_accepts,
+        total_accept_decisions,
+    )
 
 
 def find_directories_with_prefix(prefix: str) -> List[str]:
@@ -88,9 +110,17 @@ def analyze_results(prefix: str) -> None:
         data, file_count = load_jsonl_files(directory)
         all_data.extend(data)
 
-        accuracy, avg_speed, avg_tokens, avg_thinks, correct, total = calculate_metrics(
-            data
-        )
+        (
+            accuracy,
+            avg_speed,
+            avg_tokens,
+            avg_thinks,
+            correct,
+            total,
+            accept_rate,
+            total_accepts,
+            total_accept_decisions,
+        ) = calculate_metrics(data)
 
         print(f"Directory: {directory}")
         print(f"  Entries: {len(data)} (from {file_count} files)")
@@ -98,6 +128,9 @@ def analyze_results(prefix: str) -> None:
         print(f"  Average tokens: {avg_tokens}")
         print(f"  Average thinks: {avg_thinks}")
         print(f"  Average speed: {avg_speed:.2f}")
+        print(
+            f"  Accept rate: {total_accepts}/{total_accept_decisions} ({accept_rate:.4f})"
+        )
         print()
 
     if not all_data:
@@ -112,6 +145,9 @@ def analyze_results(prefix: str) -> None:
         avg_thinks,
         overall_correct,
         overall_total,
+        overall_accept_rate,
+        overall_total_accepts,
+        overall_total_accept_decisions,
     ) = calculate_metrics(all_data)
 
     print("Overall Results:")
@@ -123,6 +159,10 @@ def analyze_results(prefix: str) -> None:
     print(f"Overall average speed: {overall_speed:.2f}")
     print(f"Overall average tokens: {avg_tokens}")
     print(f"Overall average thinks: {avg_thinks}")
+    print(
+        f"Overall accept rate: {overall_total_accepts}/{overall_total_accept_decisions} "
+        f"({overall_accept_rate:.4f})"
+    )
 
 
 def main():

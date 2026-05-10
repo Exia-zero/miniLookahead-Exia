@@ -1,5 +1,10 @@
 {
     "python-envs.defaultEnvManager": "ms-python.python:conda",
     "python-envs.defaultPackageManager": "ms-python.python:conda",
-    "python.defaultInterpreterPath": "/home/ziyuezhang/miniconda3/envs/miniLookahead/bin/python"
+    "python.defaultInterpreterPath": "/home/ziyuezhang/miniconda3/envs/miniLookahead/bin/python",
+    "editor.formatOnSave": true,
+    "[python]": {
+        "editor.defaultFormatter": "ms-python.black-formatter"
+    },
+    "black-formatter.importStrategy": "useBundled"
 }

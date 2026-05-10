@@ -50,18 +50,65 @@ def get_model_response(
             top_p=0.95,
         )
         finish_reason = response.choices[0].finish_reason
-        if method == "llm-j" or method == "emb":
-            if hasattr(response.choices[0], "stop_reason"):
-                stop_reason = response.choices[0].stop_reason
-            else:
-                stop_reason = response.choices[0].matched_stop
-        elif method == "baseline":
-            stop_reason = response.choices[0].stop_reason
+        stop_reason = get_completion_stop_reason(response.choices[0])
         # Get the response content
         completion_text = response.choices[0].text
         return completion_text, finish_reason, stop_reason
     except Exception as e:
         print(f"Error getting response: {e} {model}")
+        return None
+
+
+def get_completion_stop_reason(choice):
+    """Get stop reason from OpenAI-compatible completion choice"""
+    if hasattr(choice, "stop_reason"):
+        return choice.stop_reason
+    if hasattr(choice, "matched_stop"):
+        return choice.matched_stop
+    return None
+
+
+def get_batched_model_responses(
+    prompts,
+    model=None,
+    temperature=0.0,
+    max_tokens=1000,
+    stop=None,
+    client=None,
+):
+    try:
+        response = client.completions.create(
+            model=model,
+            prompt=prompts,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            stop=stop,
+            top_p=0.95,
+        )
+        ordered_choices = [None] * len(prompts)
+        for fallback_idx, choice in enumerate(response.choices):
+            choice_idx = getattr(choice, "index", fallback_idx)
+            if choice_idx is None or choice_idx >= len(prompts):
+                choice_idx = fallback_idx
+            ordered_choices[choice_idx] = choice
+
+        results = []
+
+        for choice in ordered_choices:
+            if choice is None:
+                results.append((None, None, None))
+            else:
+                results.append(
+                    (
+                        choice.text,
+                        choice.finish_reason,
+                        get_completion_stop_reason(choice),
+                    )
+                )
+        return results
+
+    except Exception as e:
+        print(f"Error getting batched responses: {e} {model}")
         return None
 
 
@@ -137,10 +184,31 @@ def parse_arguments():
         help="Model path",
     )
     parser.add_argument(
+        "--draft_model",
+        type=str,
+        default="Qwen/Qwen3-0.6B",
+        help="Draft model path",
+    )
+    parser.add_argument(
         "--judge_model",
         type=str,
         default="Qwen/Qwen2.5-7B-Instruct",
         help="Judge model path",
+    )
+    parser.add_argument("--target_port", type=int, default=12347, help="Target server port")
+    parser.add_argument("--draft_port", type=int, default=12345, help="Draft server port")
+    parser.add_argument("--judge_port", type=int, default=8000, help="Judge server port")
+    parser.add_argument(
+        "--embedding_device",
+        type=str,
+        default="cuda:0",
+        help="Device for embedding verifier",
+    )
+    parser.add_argument(
+        "--embedding_model",
+        type=str,
+        default="sentence-transformers/all-mpnet-base-v2",
+        help="Embedding verifier model path",
     )
     parser.add_argument(
         "--dataset", type=str, default="../data/aime-2024.jsonl", help="Dataset path"
@@ -151,6 +219,10 @@ def parse_arguments():
     parser.add_argument("--prompt_idx", type=int, default=0, help="Prompt index")
     parser.add_argument("--threshold", type=float, default=0.95, help="Prompt index")
     parser.add_argument("--allow_no_stop", action="store_true", help="Allow no stop")
+    parser.add_argument("--max_depth", type=int, default=4, help="Lookahead depth")
+    parser.add_argument(
+        "--step_max_tokens", type=int, default=100, help="Max tokens per reasoning step"
+    )
     parser.add_argument("--max_workers", type=int, default=20, help="Max workers")
     parser.add_argument("--max_samples", type=int, default=1, help="Max samples")
     return parser.parse_args()
@@ -159,19 +231,29 @@ def parse_arguments():
 def initialize_clients(args):
     """Initialize OpenAI clients for target, draft, and judge models"""
     target_client = [
-        OpenAI(base_url=f"http://127.0.0.1:12347/v1", api_key="None", timeout=100000)
+        OpenAI(
+            base_url=f"http://127.0.0.1:{args.target_port}/v1",
+            api_key="None",
+            timeout=100000,
+        )
     ]
 
     draft_client = None
     judge_client = None
-    if args.method == "llm-j" or args.method == "emb":
+    if args.method in ("llm-j", "emb"):
         draft_client = [
             OpenAI(
-                base_url=f"http://127.0.0.1:12345/v1", api_key="None", timeout=100000
+                base_url=f"http://127.0.0.1:{args.draft_port}/v1",
+                api_key="None",
+                timeout=100000,
             )
         ]
         judge_client = [
-            OpenAI(base_url=f"http://127.0.0.1:8000/v1", api_key="None", timeout=100000)
+            OpenAI(
+                base_url=f"http://127.0.0.1:{args.judge_port}/v1",
+                api_key="None",
+                timeout=100000,
+            )
         ]
 
     return target_client, draft_client, judge_client
@@ -191,14 +273,14 @@ def setup_output_directory(prefix):
     return output_dir
 
 
-def setup_embedding_model():
+def setup_embedding_model(args):
     """Setup embedding model and similarity function for 'emb' method"""
-    embedding_device = "cuda:2"
-    print(f"Loading embedding model to {embedding_device}")
+    embedding_device = args.embedding_device
+    print(f"Loading embedding model {args.embedding_model} to {embedding_device}")
 
     try:
         embedding_model = SentenceTransformer(
-            "all-mpnet-base-v2", device=embedding_device
+            args.embedding_model, device=embedding_device
         )
         print(f"Successfully loaded embedding model to {embedding_device}")
     except Exception as e:
@@ -255,143 +337,229 @@ def process_questions_parallel(
         generation_draft = []
         accepts = []
         equals = []
+        appended_in_branch = False
+
+        def append_stop_text(text, finish_reason, stop_reason):
+            if text is None:
+                text = ""
+            if finish_reason == "stop" and stop_reason == "\n\n":
+                return text + "\n\n"
+            return text
+
+        def generate_step(prompt, client, model):
+            return get_model_response(
+                prompt,
+                temperature=temperature,
+                max_tokens=args.step_max_tokens,
+                stop=["\n\n"],
+                client=client,
+                model=model,
+                method=args.method,
+            )
+
+        def generate_draft_steps(base_prompt):
+            draft_steps = []
+            draft_prefix = ""
+            for _ in range(args.max_depth):
+                draft_result = generate_step(
+                    base_prompt + draft_prefix,
+                    draft_client[0],
+                    args.draft_model,
+                )
+                if draft_result is None:
+                    break
+
+                sentence_draft, finish_reason_draft, stop_reason_draft = draft_result
+                draft_step_text = append_stop_text(
+                    sentence_draft,
+                    finish_reason_draft,
+                    stop_reason_draft,
+                )
+                draft_steps.append(
+                    {
+                        "text": sentence_draft,
+                        "finish_reason": finish_reason_draft,
+                        "stop_reason": stop_reason_draft,
+                        "step_text": draft_step_text,
+                    }
+                )
+                draft_prefix += draft_step_text
+
+                if finish_reason_draft == "stop" and stop_reason_draft != "\n\n":
+                    break
+
+            return draft_steps
+
+        def build_target_prompts(base_prompt, draft_steps):
+            target_prompts = []
+            draft_prefix = ""
+            for draft_step in draft_steps:
+                target_prompts.append(base_prompt + draft_prefix)
+                draft_prefix += draft_step["step_text"]
+            return target_prompts
+
+        def generate_target_steps(target_prompts):
+            return get_batched_model_responses(
+                target_prompts,
+                temperature=temperature,
+                max_tokens=args.step_max_tokens,
+                stop=["\n\n"],
+                client=target_client[0],
+                model=args.model,
+            )
+
+        def verify_step(
+            sentence_target,
+            sentence_draft,
+            finish_reason,
+            stop_reason,
+            finish_reason_draft,
+        ):
+            equal = None
+            is_aligned = False
+
+            if args.method == "llm-j":
+                if args.prompt_idx == -1:
+                    equal, _, _ = get_model_response(
+                        equal_prompt.format(
+                            (sentence_target or "").strip(),
+                            (sentence_draft or "").strip(),
+                        ),
+                        temperature=0.0,
+                        max_tokens=1000,
+                        client=judge_client[0],
+                        model=args.judge_model,
+                    )
+                    # print("xEqual: ", equal)
+                    is_aligned = (
+                        "[aligned]" in (equal or "")
+                        and "[unaligned]" not in (equal or "")
+                        and finish_reason == "stop"
+                        and finish_reason_draft == "stop"
+                    )
+                else:
+                    equal, _, _ = get_model_response(
+                        equal_prompt.format(
+                            (sentence_target or "").strip(),
+                            (sentence_draft or "").strip(),
+                        ),
+                        temperature=0.0,
+                        max_tokens=1,
+                        client=judge_client[0],
+                        model=args.judge_model,
+                    )
+                    is_aligned = (
+                        "ali" in (equal or "")
+                        and "un" not in (equal or "")
+                        and (
+                            args.allow_no_stop
+                            or (finish_reason == "stop" and stop_reason == "\n\n")
+                        )
+                    )
+
+            elif args.method == "emb":
+                similarity = compute_similarity(
+                    (sentence_target or "").strip(),
+                    (sentence_draft or "").strip(),
+                )
+                equal = (
+                    similarity.item()
+                    if hasattr(similarity, "item")
+                    else float(similarity)
+                )
+                # print("Equal: ", equal)
+                is_aligned = equal > args.threshold and (
+                    args.allow_no_stop
+                    or (finish_reason == "stop" and stop_reason == "\n\n")
+                )
+
+            return equal, is_aligned
+
+        def choose_step_text(
+            is_aligned,
+            sentence_target,
+            sentence_draft,
+            finish_reason,
+            stop_reason,
+            finish_reason_draft,
+            stop_reason_draft,
+        ):
+            if is_aligned:
+                return append_stop_text(
+                    sentence_draft,
+                    finish_reason_draft,
+                    stop_reason_draft,
+                )
+            return append_stop_text(sentence_target, finish_reason, stop_reason)
+
         if args.method == "llm-j" or args.method == "emb":
             infos = []
 
             token_length = 0
+            appended_in_branch = True
             while True:
-                inp = inp + next_sentence
-                if args.method == "llm-j":
-                    sentence_target, finish_reason, stop_reason = get_model_response(
-                        inp,
-                        temperature=temperature,
-                        max_tokens=100,
-                        stop=["\n\n"],
-                        client=target_client[0],
-                        model=args.model,
-                        method=args.method,
-                    )
-                elif args.method == "emb":
-                    sentence_target, finish_reason, stop_reason = get_model_response(
-                        inp,
-                        temperature=temperature,
-                        max_tokens=100,
-                        stop=["\n\n"],
-                        client=target_client[0],
-                        model=args.model,
-                        method=args.method,
-                    )
-                generation_target.append(sentence_target)
-
-                if finish_reason == "stop" and stop_reason != "\n\n":
-                    next_sentence = sentence_target
-                    generations.append(next_sentence)
+                should_finish = False
+                draft_steps = generate_draft_steps(inp)
+                if not draft_steps:
                     break
-                sentence_draft, finish_reason_draft, stop_reason_draft = (
-                    get_model_response(
-                        inp,
-                        temperature=temperature,
-                        max_tokens=100,
-                        stop=["\n\n"],
-                        client=draft_client[0],
-                        model="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
-                        method=args.method,
+
+                target_prompts = build_target_prompts(inp, draft_steps)
+                target_steps = generate_target_steps(target_prompts)
+                if not target_steps:
+                    break
+
+                next_sentence = ""
+                for draft_step, target_step in zip(draft_steps, target_steps):
+                    sentence_target, finish_reason, stop_reason = target_step
+                    sentence_draft = draft_step["text"]
+                    finish_reason_draft = draft_step["finish_reason"]
+                    stop_reason_draft = draft_step["stop_reason"]
+
+                    generation_target.append(sentence_target)
+                    generation_draft.append(sentence_draft)
+
+                    if finish_reason == "stop" and stop_reason != "\n\n":
+                        step_text = sentence_target or ""
+                        next_sentence += step_text
+                        generations.append(step_text)
+                        should_finish = True
+                        break
+
+                    equal, is_aligned = verify_step(
+                        sentence_target,
+                        sentence_draft,
+                        finish_reason,
+                        stop_reason,
+                        finish_reason_draft,
                     )
-                )
-                generation_draft.append(sentence_draft)
+                    step_text = choose_step_text(
+                        is_aligned,
+                        sentence_target,
+                        sentence_draft,
+                        finish_reason,
+                        stop_reason,
+                        finish_reason_draft,
+                        stop_reason_draft,
+                    )
+                    accepts.append(1 if is_aligned else 0)
 
-                if args.method == "llm-j":
-                    if args.prompt_idx == -1:
-                        equal, _, _ = get_model_response(
-                            equal_prompt.format(
-                                sentence_target.strip(), sentence_draft.strip()
-                            ),
-                            temperature=0.0,
-                            max_tokens=1000,
-                            client=judge_client[0],
-                            model=args.judge_model,
-                        )
+                    next_sentence += step_text
+                    generations.append(step_text)
+                    infos.append((equal, sentence_target, sentence_draft))
+                    equals.append(equal)
 
-                        print("xEqual: ", equal)
-                        if (
-                            "[aligned]" in equal
-                            and "[unaligned]" not in equal
-                            and finish_reason == "stop"
-                            and finish_reason_draft == "stop"
-                        ):
-                            next_sentence = sentence_draft
-                            if (
-                                finish_reason_draft == "stop"
-                                and stop_reason_draft == "\n\n"
-                            ):
-                                next_sentence += "\n\n"
-                            accepts.append(1)
-                        else:
-                            next_sentence = sentence_target
-                            if finish_reason == "stop" and stop_reason == "\n\n":
-                                next_sentence += "\n\n"
-                            accepts.append(0)
+                    if not is_aligned:
+                        break
 
-                    else:
-                        equal, _, _ = get_model_response(
-                            equal_prompt.format(
-                                sentence_target.strip(), sentence_draft.strip()
-                            ),
-                            temperature=0.0,
-                            max_tokens=1,
-                            client=judge_client[0],
-                            model=args.judge_model,
-                        )
-                        print("Equal: ", equal)
-                        if (
-                            "ali" in equal
-                            and "un" not in equal
-                            and (
-                                args.allow_no_stop
-                                or (finish_reason == "stop" and stop_reason == "\n\n")
-                            )
-                        ):
-                            next_sentence = sentence_draft
-                            if (
-                                finish_reason_draft == "stop"
-                                and stop_reason_draft == "\n\n"
-                            ):
-                                next_sentence += "\n\n"
-                            accepts.append(1)
-                        else:
-                            next_sentence = sentence_target
-                            if finish_reason == "stop" and stop_reason == "\n\n":
-                                next_sentence += "\n\n"
-                            accepts.append(0)
+                if not next_sentence:
+                    break
 
-                elif args.method == "emb":
-                    equal = compute_similarity(
-                        sentence_target.strip(), sentence_draft.strip()
-                    ).item()
-                    print("Equal: ", equal)
-                    if equal > args.threshold and (
-                        args.allow_no_stop
-                        or (finish_reason == "stop" and stop_reason == "\n\n")
-                    ):
-                        next_sentence = sentence_draft
-                        if (
-                            finish_reason_draft == "stop"
-                            and stop_reason_draft == "\n\n"
-                        ):
-                            next_sentence += "\n\n"
-                        accepts.append(1)
-                    else:
-                        next_sentence = sentence_target
-                        if finish_reason == "stop" and stop_reason == "\n\n":
-                            next_sentence += "\n\n"
-                        accepts.append(0)
-
-                generations.append(next_sentence)
-                infos.append((equal, generation_target[-1], generation_draft[-1]))
-                equals.append(equal)
-
+                inp += next_sentence
                 tokens = tokenizer.encode(next_sentence, add_special_tokens=False)
                 token_length += len(tokens)
+
+                if should_finish:
+                    break
 
                 if token_length > 32768:
                     print(
@@ -408,7 +576,8 @@ def process_questions_parallel(
                 model=args.model,
             )
 
-        inp = inp + next_sentence
+        if not appended_in_branch:
+            inp = inp + next_sentence
         t1 = time.time()
         generation_text = inp[len(target_prompt) :]
         generation_tokens = tokenizer.encode(generation_text, add_special_tokens=False)
@@ -431,6 +600,9 @@ def process_questions_parallel(
                 "answer": inp,
                 "accepts": accepts,
                 "equals": equals,
+                "num_accepts": sum(accepts),
+                "num_accept_decisions": len(accepts),
+                "accept_rate": sum(accepts) / len(accepts) if accepts else 0,
                 "generations_target": generation_target,
                 "generations_draft": generation_draft,
                 "generations": generations,
@@ -453,6 +625,9 @@ def process_questions_parallel(
                 "answer": inp,
                 "accepts": accepts,
                 "equals": equals,
+                "num_accepts": sum(accepts),
+                "num_accept_decisions": len(accepts),
+                "accept_rate": sum(accepts) / len(accepts) if accepts else 0,
                 "generations_target": generation_target,
                 "generations_draft": generation_draft,
                 "generations": generations,
@@ -538,7 +713,7 @@ def main():
     # Setup embedding model if needed
     compute_similarity = None
     if args.method == "emb":
-        compute_similarity = setup_embedding_model()
+        compute_similarity = setup_embedding_model(args)
 
     # Load questions
     questions = load_questions(args.dataset)[args.start_qid : args.end_qid]
