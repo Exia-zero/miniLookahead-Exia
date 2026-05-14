@@ -223,8 +223,20 @@ def parse_arguments():
     parser.add_argument(
         "--step_max_tokens", type=int, default=100, help="Max tokens per reasoning step"
     )
-    parser.add_argument("--max_workers", type=int, default=20, help="Max workers")
+    parser.add_argument("--max_workers", type=int, default=1, help="Max workers")
     parser.add_argument("--max_samples", type=int, default=1, help="Max samples")
+    parser.add_argument(
+        "--warmup_requests",
+        type=int,
+        default=0,
+        help="Number of target model warmup requests before timed dataset processing",
+    )
+    parser.add_argument(
+        "--warmup_max_tokens",
+        type=int,
+        default=256,
+        help="Max tokens for each warmup request",
+    )
     return parser.parse_args()
 
 
@@ -262,6 +274,42 @@ def initialize_clients(args):
 def initialize_tokenizer(args):
     """Initialize tokenizer for token counting"""
     return AutoTokenizer.from_pretrained(args.model)
+
+
+def build_problem_prompt(question_text, tokenizer):
+    """Build the problem prompt using the model's chat template."""
+    prompt = (
+        question_text
+        + "\nPlease reason step by step, and put your final answer within \\boxed{{}}.\n"
+    )
+    return tokenizer.apply_chat_template(
+        [{"role": "user", "content": prompt}],
+        add_generation_prompt=True,
+        tokenize=False,
+    )
+
+
+def warmup_target_model(args, target_client, tokenizer):
+    """Warm up the target vLLM server before timed dataset processing."""
+    if args.warmup_requests <= 0:
+        return
+
+    prompt = build_problem_prompt("What is 123 + 456?", tokenizer)
+
+    print(f"Warming up target model for {args.warmup_requests} requests...")
+    for request_idx in range(args.warmup_requests):
+        result = get_model_response(
+            prompt,
+            temperature=0.6,
+            max_tokens=args.warmup_max_tokens,
+            client=target_client[0],
+            model=args.model,
+        )
+        if result is None:
+            raise RuntimeError(
+                f"Warmup request {request_idx + 1}/{args.warmup_requests} failed"
+            )
+        print(f"Warmup {request_idx + 1}/{args.warmup_requests} done")
 
 
 def setup_output_directory(prefix):
@@ -328,7 +376,7 @@ def process_questions_parallel(
         if "id" not in q:
             q["id"] = question_idx
 
-        inp = "<｜User｜>" + q["question"] + "<｜Assistant｜>"
+        inp = build_problem_prompt(q["question"], tokenizer)
         target_prompt = inp
         t0 = time.time()
         next_sentence = ""
@@ -722,6 +770,9 @@ def main():
     equal_prompt = None
     if args.method == "llm-j":
         equal_prompt = equal_prompts[args.prompt_idx]
+
+    # Warmup happens outside per-question timing.
+    warmup_target_model(args, target_client, tokenizer)
 
     # Process questions in parallel
     results = process_questions_parallel(

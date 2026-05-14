@@ -47,3 +47,6 @@ checkpoints/
 models/
 emb_*/
 qwen3_*/
+X_qwen3_*/
+baseline_*/
+llmj_*/

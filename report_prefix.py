@@ -11,8 +11,8 @@ def extract_boxed_answer(text: str) -> str:
     return matches[-1] if matches else ""
 
 
-def load_jsonl_files(directory: str) -> List[Dict[str, Any]]:
-    """Load all jsonl files from a directory."""
+def load_jsonl_files(directory: str) -> Tuple[List[Dict[str, Any]], int]:
+    """Load all per-question JSON result files from a directory."""
     data = []
     file_count = 0
     for filename in os.listdir(directory):
@@ -78,26 +78,30 @@ def calculate_metrics(data: List[Dict[str, Any]]) -> Tuple:
     )
 
 
-def find_directories_with_prefix(prefix: str) -> List[str]:
-    """Find all directories in current directory that start with the given prefix."""
-    current_dir = os.getcwd()
+def find_directories_with_prefix(prefix: str, search_dir: str) -> List[str]:
+    """Find all directories under search_dir that start with the given prefix."""
     matching_dirs = []
 
-    for item in os.listdir(current_dir):
-        if os.path.isdir(item) and item.startswith(prefix):
-            matching_dirs.append(item)
+    if not os.path.isdir(search_dir):
+        return matching_dirs
+
+    for item in os.listdir(search_dir):
+        path = os.path.join(search_dir, item)
+        if os.path.isdir(path) and item.startswith(prefix):
+            matching_dirs.append(path)
 
     return sorted(matching_dirs)
 
 
-def analyze_results(prefix: str) -> None:
+def analyze_results(prefix: str, search_dir: str) -> None:
     """Analyze results from directories matching the prefix."""
-    directories = find_directories_with_prefix(prefix)
+    directories = find_directories_with_prefix(prefix, search_dir)
 
     if not directories:
-        print(f"No directories found with prefix '{prefix}'")
+        print(f"No directories found with prefix '{prefix}' under '{search_dir}'")
         return
 
+    print(f"Searching in: {search_dir}")
     print(f"Found directories with prefix '{prefix}': {directories}")
     print()
 
@@ -167,12 +171,19 @@ def analyze_results(prefix: str) -> None:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Analyze JSONL results from directories with matching prefix"
+        description="Analyze JSON results from directories with matching prefix"
     )
     parser.add_argument("prefix", help="Prefix to match directory names")
+    parser.add_argument(
+        "--search-dir",
+        "--search_dir",
+        default="results",
+        dest="search_dir",
+        help="Directory containing result run folders",
+    )
 
     args = parser.parse_args()
-    analyze_results(args.prefix)
+    analyze_results(args.prefix, args.search_dir)
 
 
 if __name__ == "__main__":

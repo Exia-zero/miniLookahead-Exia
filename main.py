@@ -22,7 +22,7 @@ parser.add_argument("--width", type=int, default=1)
 parser.add_argument("--model", type=str, default="Qwen/Qwen3-32B")
 parser.add_argument("--draft_model", type=str, default="Qwen/Qwen3-1.7B")
 parser.add_argument("--judge_model", type=str, default="Qwen/Qwen2.5-7B-Instruct")
-parser.add_argument("--judge_port", type=int, default=8000)
+parser.add_argument("--judge_port", type=int, default=8108)
 
 parser.add_argument("--target_gpu_id", type=str, default="0,1")
 parser.add_argument("--draft_gpu_id", type=str, default="2")
