@@ -38,6 +38,8 @@ htmlcov/
 *.tmp
 *.temp
 .DS_Store
+.agents
+.claude
 
 # Local model, checkpoint, and experiment outputs
 outputs/
@@ -50,3 +52,4 @@ qwen3_*/
 X_qwen3_*/
 baseline_*/
 llmj_*/
+lookahead_*/

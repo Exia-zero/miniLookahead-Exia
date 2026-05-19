@@ -151,7 +151,7 @@ class TreeNode:
                                                     empty=False, max_depth=self.max_depth, generated_tokens=self.generated_tokens + self.drafter_data['n'], \
                                                     target_config=self.target_config, draft_config=self.draft_config,\
                                                         qid=self.qid, ignore_half_sentence=self.ignore_half_sentence, accept_func=self.accept_func, judge_client=self.judge_client,\
-                                                        draft2target=self.draft2target, target2draft=self.target2draft))
+                                                        draft2target=self.draft2target, target2draft=self.target2draft, judge_model=self.judge_model))
             return True
         return False
 
@@ -192,4 +192,3 @@ class TreeNode:
             pass
         for child in self.children:
             await child.traverse_collect_main()
-
